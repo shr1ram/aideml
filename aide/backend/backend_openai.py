@@ -75,7 +75,11 @@ def query(
 
     if use_chat_api:
         _setup_custom_client()
-        # Standard chat completions API (for local servers)
+        # Standard chat completions API (for local servers).
+        # chat.completions expects `max_tokens`, but above we renamed it to
+        # `max_output_tokens` for the responses API — undo that for this path.
+        if "max_output_tokens" in filtered_kwargs:
+            filtered_kwargs["max_tokens"] = filtered_kwargs.pop("max_output_tokens")
         messages = opt_messages_to_list(system_message, user_message)
         if func_spec is not None:
             filtered_kwargs["tools"] = [func_spec.as_openai_tool_dict]

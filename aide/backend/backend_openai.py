@@ -53,6 +53,78 @@ def _setup_custom_client():
         )
 
 
+def _streamed_chat_completion(client, messages, **kwargs):
+    """chat.completions with stream=True, reassembled into a non-streaming-shaped
+    object (.choices[0].message.content/.tool_calls + .usage).
+
+    The team LiteLLM proxy sits behind an Alibaba gateway that 504s after ~180s on
+    *idle* non-streaming connections. Reasoning models (Kimi) often think longer
+    than that before the first byte, so a plain create() hangs then 504s. Streaming
+    keeps bytes flowing so the gateway never reaps the socket.
+    """
+    from types import SimpleNamespace
+
+    kwargs.pop("stream", None)
+    stream = client.chat.completions.create(
+        messages=messages, stream=True,
+        stream_options={"include_usage": True}, **kwargs,
+    )
+    content_parts, tool_calls = [], {}
+    finish_reason, usage = None, None
+    model = kwargs.get("model")
+    resp_id = system_fingerprint = created = None
+    for chunk in stream:
+        if getattr(chunk, "model", None):
+            model = chunk.model
+        if getattr(chunk, "id", None):
+            resp_id = chunk.id
+        if getattr(chunk, "system_fingerprint", None):
+            system_fingerprint = chunk.system_fingerprint
+        if getattr(chunk, "created", None):
+            created = chunk.created
+        if getattr(chunk, "usage", None) is not None:
+            usage = chunk.usage
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+        delta = choice.delta
+        if getattr(delta, "content", None):
+            content_parts.append(delta.content)
+        for tc in (getattr(delta, "tool_calls", None) or []):
+            slot = tool_calls.setdefault(tc.index, {"id": None, "name": "", "args": ""})
+            if tc.id:
+                slot["id"] = tc.id
+            if tc.function and tc.function.name:
+                slot["name"] += tc.function.name
+            if tc.function and tc.function.arguments:
+                slot["args"] += tc.function.arguments
+    msg_tool_calls = None
+    if tool_calls:
+        msg_tool_calls = [
+            SimpleNamespace(
+                id=slot["id"], type="function",
+                function=SimpleNamespace(name=slot["name"], arguments=slot["args"]),
+            )
+            for _, slot in sorted(tool_calls.items())
+        ]
+    message = SimpleNamespace(
+        content="".join(content_parts) if content_parts else None,
+        tool_calls=msg_tool_calls, role="assistant",
+    )
+    if usage is None:
+        usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+        usage=usage,
+        model=model,
+        id=resp_id,
+        system_fingerprint=system_fingerprint,
+        created=created,
+    )
+
+
 def query(
     system_message: str | None,
     user_message: str | None,
@@ -114,9 +186,10 @@ def query(
             # Use custom client if available, otherwise fall back to default
             client_to_use = _custom_client if _custom_client else _client
             response = backoff_create(
-                client_to_use.chat.completions.create,
+                _streamed_chat_completion,
                 OPENAI_TIMEOUT_EXCEPTIONS,
-                messages=messages,
+                client_to_use,
+                messages,
                 **filtered_kwargs,
             )
         else:
@@ -142,9 +215,10 @@ def query(
                 # Use custom client if available, otherwise fall back to default
                 client_to_use = _custom_client if _custom_client else _client
                 response = backoff_create(
-                    client_to_use.chat.completions.create,
+                    _streamed_chat_completion,
                     OPENAI_TIMEOUT_EXCEPTIONS,
-                    messages=messages,
+                    client_to_use,
+                    messages,
                     **filtered_kwargs,
                 )
             else:

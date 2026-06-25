@@ -28,4 +28,5 @@ def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):
         model=rcfg.model,
         temperature=rcfg.temp,
         max_tokens=4096,
+        purpose="report",
     )

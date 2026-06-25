@@ -38,6 +38,7 @@ def query(
     temperature: float | None = None,
     max_tokens: int | None = None,
     func_spec: FunctionSpec | None = None,
+    purpose: str = "code",   # "code" | "feedback" | "report" — for run-trace role
     **model_kwargs,
 ) -> OutputType:
     """
@@ -71,4 +72,50 @@ def query(
         **model_kwargs,
     )
 
+    _trace_llm_call(
+        model=model, system_message=system_message, user_message=user_message,
+        output=output, req_time=req_time, in_tok=in_tok_count, out_tok=out_tok_count,
+        func_spec=func_spec, purpose=purpose,
+    )
+
     return output
+
+
+def _trace_llm_call(model, system_message, user_message, output,
+                    req_time, in_tok, out_tok, func_spec, purpose="code"):
+    """Append one call record to $ARBENCH_LLM_TRACE (the arbench run bundle).
+
+    Self-contained (no arbench import) so the fork stays standalone; no-op when
+    the env var is unset. Set ARBENCH_TRACE_FULL=0 to omit prompt/response text.
+    """
+    import os as _os, json as _json, time as _time
+    path = _os.environ.get("ARBENCH_LLM_TRACE")
+    if not path:
+        return
+    full = _os.environ.get("ARBENCH_TRACE_FULL", "1") != "0"
+
+    def _txt(x):
+        if x is None:
+            return None
+        try:
+            return x if isinstance(x, str) else _json.dumps(x, default=str)[:200000]
+        except Exception:
+            return str(x)[:200000]
+
+    rec = {
+        "ts": _time.time(),
+        "model": model,
+        "role": purpose,  # set by the caller: code | feedback | report
+        "prompt_tokens": int(in_tok or 0),
+        "completion_tokens": int(out_tok or 0),
+        "latency_s": round(float(req_time or 0.0), 4),
+        "system": _txt(system_message) if full else None,
+        "user": _txt(user_message) if full else None,
+        "response": _txt(output) if full else None,
+        "extra": {"func_call": func_spec is not None},
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass

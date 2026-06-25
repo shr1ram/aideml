@@ -14,6 +14,12 @@ logger = logging.getLogger("aide")
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+# A dropped/half-open connection to a custom proxy (e.g. LiteLLM) must NOT
+# hang the agent forever. Give the client a hard request timeout and a few
+# retries so a stalled call fails fast and AIDE's own loop can recover.
+OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "180"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "4"))
+
 _client: openai.OpenAI = None  # type: ignore
 _custom_client: openai.OpenAI = None  # type: ignore
 
@@ -30,7 +36,8 @@ def _setup_openai_client():
     global _client
     # Use real OpenAI API with proper API key, explicitly override base_url
     api_key = os.getenv("OPENAI_API_KEY")
-    _client = openai.OpenAI(api_key=api_key, base_url=OPENAI_BASE_URL, max_retries=0)
+    _client = openai.OpenAI(api_key=api_key, base_url=OPENAI_BASE_URL,
+                            timeout=OPENAI_REQUEST_TIMEOUT, max_retries=OPENAI_MAX_RETRIES)
 
 
 @once
@@ -41,7 +48,8 @@ def _setup_custom_client():
     api_key = os.getenv("OPENAI_API_KEY")
     if base_url:
         _custom_client = openai.OpenAI(
-            api_key=api_key, base_url=base_url, max_retries=0
+            api_key=api_key, base_url=base_url,
+            timeout=OPENAI_REQUEST_TIMEOUT, max_retries=OPENAI_MAX_RETRIES,
         )
 
 

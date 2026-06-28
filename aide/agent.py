@@ -171,7 +171,11 @@ class Agent:
 
             print("Plan + code extraction failed, retrying...")
         print("Final plan + code extraction attempt failed, giving up...")
-        return "", completion_text  # type: ignore
+        # Never return None as 'code' (downstream writes it to a .py file). Coerce
+        # to safe strings: use any extracted code, else the raw completion, else ''.
+        safe_text = nl_text or ""
+        safe_code = code or (completion_text if isinstance(completion_text, str) else "") or ""
+        return safe_text, safe_code
 
     def _draft(self) -> Node:
         prompt: Any = {

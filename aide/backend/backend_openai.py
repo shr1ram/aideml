@@ -93,7 +93,10 @@ def _streamed_chat_completion(client, messages, **kwargs):
         if getattr(delta, "content", None):
             content_parts.append(delta.content)
         for tc in (getattr(delta, "tool_calls", None) or []):
-            slot = tool_calls.setdefault(tc.index, {"id": None, "name": "", "args": ""})
+            # Some providers stream tool_call deltas with index=None; fall back to
+            # positional so distinct calls don't collide on a single None key.
+            idx = tc.index if tc.index is not None else len(tool_calls)
+            slot = tool_calls.setdefault(idx, {"id": None, "name": "", "args": ""})
             if tc.id:
                 slot["id"] = tc.id
             if tc.function and tc.function.name:
@@ -113,8 +116,21 @@ def _streamed_chat_completion(client, messages, **kwargs):
         content="".join(content_parts) if content_parts else None,
         tool_calls=msg_tool_calls, role="assistant",
     )
+    usage_estimated = False
     if usage is None:
-        usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        # The proxy didn't return a usage chunk (stream_options unsupported).
+        # Don't silently record 0 tokens — that corrupts cost data. Estimate from
+        # char counts (~4 chars/token) and flag it so the trace knows it's approximate.
+        def _toklen(s):
+            return max(0, len(s or "") // 4)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        usage = SimpleNamespace(
+            prompt_tokens=_toklen(" " * prompt_chars),
+            completion_tokens=_toklen("".join(content_parts)),
+            total_tokens=0,
+        )
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
+        usage_estimated = True
     return SimpleNamespace(
         choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
         usage=usage,
@@ -122,6 +138,7 @@ def _streamed_chat_completion(client, messages, **kwargs):
         id=resp_id,
         system_fingerprint=system_fingerprint,
         created=created,
+        usage_estimated=usage_estimated,
     )
 
 
